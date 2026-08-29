@@ -1,0 +1,24 @@
+{
+  "name": "bot-gastos-personal",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "set-webhook": "ts-node --transpile-only scripts/set-webhook.ts"
+  },
+  "dependencies": {
+    "googleapis": "^176.0.0",
+    "next": "14.2.35",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.9",
+    "@types/react": "18.3.3",
+    "typescript": "5.5.3",
+    "ts-node": "10.9.2"
+  }
+}
