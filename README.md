@@ -1,203 +1,337 @@
 # Bot de Gastos Personales (Telegram + Google Sheets)
 
-Bot personal para cargar gastos por Telegram con texto libre, guardándolos en una Google Sheet.
-Deploy en Vercel, sin base de datos.
+## 1. Qué es
 
-## Estructura
+Un bot personal de Telegram para registrar gastos por mensaje de texto libre — sin comandos
+rígidos tipo `/gasto categoria monto`, simplemente le escribís como le hablarías a una persona
+("gasto nafta 55000", "pagué el super 120.000") y el bot entiende monto, categoría y fecha solo.
+
+Todo se guarda en una Google Sheet (no hay base de datos tradicional), con un Dashboard de
+gráficos y fórmulas armado sobre esos datos.
+
+Es de **uso 100% individual**: solo responde a un `chat_id` de Telegram autorizado, pensado para
+ser rápido de usar en el día a día sin fricción.
+
+## 2. Stack técnico
+
+| Pieza | Tecnología |
+|---|---|
+| Bot | Telegram Bot API, vía **webhook** (no polling) |
+| Backend | Next.js + TypeScript, como Serverless Functions en **Vercel** |
+| Almacenamiento | **Google Sheets API v4**, autenticado con una Service Account de Google Cloud |
+| Base de datos | Ninguna — todo vive en la hoja de cálculo |
+| Dashboard | Gráficos y fórmulas nativas de Google Sheets (`QUERY`, `SUMIFS`) |
+
+**Costo total: $0.** Telegram Bot API es gratis, Vercel corre en el free tier, y el uso de
+Google Cloud/Sheets API para este volumen de datos personal está dentro del nivel gratuito.
+
+## 3. Qué hace
+
+### Carga de gastos por texto libre
+
+Le escribís un mensaje y el bot detecta automáticamente **monto**, **categoría** y **fecha**, sin
+pedir confirmación previa — si logra parsear el monto, guarda directo. Ejemplos:
+
+```
+gasto nafta 55000
+gastos fideos 15000
+gasté cena 15.000 pesos
+gasto super la anonima 150.000 pesos
+gasto asado manu pinedo 22.580 pesos
+gasto luz 25/08 35.000
+gasto nafta ayer 40.000
+```
+
+Reconoce distintas formas de iniciar el mensaje (insensible a mayúsculas/acentos): `gasto`,
+`gastos`, `gaste`/`gasté`, `pague`/`pagué`, `pago`, `desconte`/`desconté`, `cargame`,
+`compre`/`compré`, `compra`. La lista completa está en `PALABRAS_DISPARADORAS`
+(`src/lib/categorias.ts`) y se puede ampliar sin tocar el parser.
+
+Si no puede detectar un monto válido, no crea ninguna fila: pide que reformules el mensaje.
+
+### Detección de fecha
+
+- **Relativa**: "ayer", "anteayer".
+- **Explícita**: "25/08" o "25/08/2026" (con o sin año, con `/` o `-`).
+- **Por defecto**: si no se menciona ninguna fecha, usa la fecha y hora actual del mensaje.
+
+### Categorización automática por palabras clave
+
+Diccionario fijo de ~22 categorías en `src/lib/categorias.ts`, pensado para editarse sin tocar
+la lógica de parseo:
+
+| Categoría | Ejemplos de keywords |
+|---|---|
+| Supermercado | super, la anonima, coto, dia, carrefour, jumbo, changomas, la coope |
+| Almacén | almacen, kiosco, chino, despensa |
+| Carnicería | carniceria |
+| Panadería | panaderia, factura, chipa, pan |
+| Farmacia | farmacia, remedios, farmacity, ibuprofeno, pastillas, medicamentos |
+| Ferretería | ferreteria, tornillos, herramientas |
+| Pinturería | pintura, rodillo, pincel, lijas |
+| Nafta | nafta, ypf, shell, axion, combustible, gasoil |
+| Luz | luz, cooperativa eléctrica |
+| Agua | agua |
+| Gas | gas, metrogas, camuzzi |
+| Internet | internet, wifi |
+| Celular | celular, tuenti, claro, movistar |
+| Impuestos municipales | impuesto, municipal, tasa, patente, inmobiliario |
+| Tarjetas/Crédito | tarjeta, credito, resumen, visa, mastercard |
+| Crédito hipotecario | hipotecario, hipoteca |
+| Cenas | cena, restaurant, delivery |
+| Almuerzo | almuerzo, mediodía |
+| Cervezas | cerveza, cerveceria, birra |
+| Alimento perro | alimento perro, purina, dog chow, veterinaria |
+| Leña | leña |
+| Otros | otros, varios (match explícito, no fallback — ver más abajo) |
+
+**Regla especial "asado"**: no es una categoría propia. Se resuelve como **Almuerzo** si el
+mensaje incluye una referencia al mediodía (ej. "almuerzo", "mediodía"), o **Cenas** por defecto.
+Una compra en carnicería, en cambio, siempre va directo a **Carnicería** sin pasar por esta regla.
+
+### Aprendizaje de categorías
+
+Cuando **ninguna** keyword (ni del diccionario fijo ni aprendida antes) matchea una palabra del
+mensaje, el bot **no la guarda directo como "Otros"**: pregunta por botones inline, paginados
+(8 categorías por página, con navegación ◀️ Anterior / Siguiente ▶️ que edita el mismo mensaje en
+vez de mandar uno nuevo por cada click). Al elegir una categoría:
+
+1. Guarda el gasto en `Movimientos` con esa categoría.
+2. Agrega una fila en la hoja `Keywords` con la palabra detectada → categoría elegida.
+3. Confirma: *"✅ Guardado como [Categoría]. A partir de ahora voy a reconocer '[palabra]'
+   automáticamente."*
+
+Desde ese momento, esa palabra se reconoce sola — el parser combina en cada mensaje el
+diccionario fijo (`categorias.ts`) con las keywords aprendidas dinámicamente (hoja `Keywords`).
+
+Si escribís "otros" o "varios" explícitamente, va directo a **Otros** sin preguntar — se
+interpreta como una elección a propósito, no como una palabra desconocida.
+
+### Confirmación y edición de cada gasto
+
+Cada gasto cargado se confirma con este formato fijo:
+
+```
+📌 Gasto cargado
+
+Fecha: 28/08/2026
+Gasto: Nafta
+Categoría: Nafta
+Total: $55.000
+
+[✏️ Editar]   [🗑️ Borrar]
+```
+
+- **🗑️ Borrar**: elimina por completo la fila de `Movimientos` (no la deja vacía).
+- **✏️ Editar**: pide que reenvíes el gasto corregido en un solo mensaje, y reemplaza el
+  contenido de esa misma fila (no crea una fila nueva).
+
+Ambos botones actúan sobre el **último gasto cargado**, cuya referencia se guarda en la hoja
+auxiliar `Estado` — necesario porque Vercel no mantiene memoria entre invocaciones serverless.
+
+### Consultas en lenguaje natural
+
+Se puede preguntar por un período sin sintaxis especial:
+
+```
+gastos de ayer
+semana pasada
+mes pasado
+resumen del mes
+```
+
+La respuesta siempre muestra el **rango de fechas exacto** considerado (ej. "la semana pasada
+(semana del 24/08 al 30/08/2026)"), el total gastado, un resumen **agrupado y sumado por
+categoría** (de mayor a menor), y una sección secundaria de **gastos más grandes** individuales.
+Si no hay gastos en el período, lo dice explícitamente en vez de mostrar otro rango por error.
+
+### `/ayuda`
+
+Lista los formatos de mensaje soportados, tanto para cargar gastos como para consultar.
+
+### Seguridad
+
+Solo responde al `chat_id` configurado en `TELEGRAM_AUTHORIZED_CHAT_ID` (hardcodeado vía
+variable de entorno); cualquier otro chat es ignorado silenciosamente. El webhook valida el
+header `X-Telegram-Bot-Api-Secret-Token` contra `TELEGRAM_WEBHOOK_SECRET` antes de procesar
+cualquier update.
+
+## 4. Arquitectura
+
+```
+Telegram (mensaje del usuario)
+   │  webhook (HTTPS POST, con secret token)
+   ▼
+Vercel — Next.js API Route: /api/telegram-webhook
+   │  Service Account (JWT) autentica contra Google Cloud
+   ▼
+Google Sheets API v4
+   ▼
+Google Sheet (4 pestañas)
+```
+
+### Pestañas de la Google Sheet
+
+| Pestaña | Para qué sirve |
+|---|---|
+| `Movimientos` | Registro de todos los gastos. Columnas: `Fecha del gasto`, `Hora de carga`, `Categoría`, `Descripción`, `Monto`, `Mensaje Original`. |
+| `Estado` | Uso interno del bot — **no tocar manualmente**. Persiste entre invocaciones serverless: último gasto cargado (para Editar/Borrar), edición pendiente, y categorización pendiente (mientras espera que elijas un botón). |
+| `Keywords` | Palabras aprendidas dinámicamente. Columnas: `Palabra clave`, `Categoría`. |
+| `Dashboard` | Gráficos y fórmulas (`QUERY`, `SUMIFS`) sobre `Movimientos`: gasto total por categoría, evolución diaria, día de mayor gasto, mes actual vs. anterior, top 10 del mes. |
+
+⚠️ **Importante**: las fórmulas del `Dashboard` usan sintaxis de Google Sheets en **español**
+(`;` como separador de argumentos, no `,`), porque la hoja está en configuración regional
+española. Si algún día las editás a mano o agregás una nueva, respetá ese separador.
+
+### Variables de entorno (Vercel)
+
+| Variable | Para qué es |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Token del bot, generado por @BotFather |
+| `TELEGRAM_WEBHOOK_SECRET` | String aleatorio para validar que los webhooks vienen de Telegram |
+| `TELEGRAM_AUTHORIZED_CHAT_ID` | El único `chat_id` al que el bot responde |
+| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | Email de la Service Account de Google Cloud |
+| `GOOGLE_PRIVATE_KEY` | Clave privada de esa Service Account (formato con `\n` literales) |
+| `GOOGLE_SHEET_ID` | ID de la Google Sheet donde se guarda todo |
+
+## 5. Estructura del repo
 
 ```
 src/
   app/
-    api/telegram-webhook/route.ts   # endpoint del webhook de Telegram
-    layout.tsx, page.tsx            # páginas mínimas de Next.js
+    api/telegram-webhook/route.ts   # único endpoint del bot: recibe mensajes y callbacks de botones
+    layout.tsx, page.tsx            # páginas mínimas de Next.js (no hay UI real, es solo el bot)
   lib/
-    categorias.ts   # diccionario de categorías/keywords (editable)
-    parser.ts        # parseo de texto libre: monto, fecha, categoría, descripción
+    categorias.ts   # diccionario de categorías/keywords fijas + palabras disparadoras (editable)
+    parser.ts        # parseo de texto libre: monto, fecha, categoría, descripción, palabra a aprender
     format.ts         # formato de fechas y montos
-    sheets.ts          # integración con Google Sheets API
-    telegram.ts        # helpers para llamar a la API de Telegram
-    consultas.ts        # resúmenes en lenguaje natural (semana/mes/top)
+    sheets.ts          # toda la integración con Google Sheets API (Movimientos, Estado, Keywords)
+    telegram.ts         # helpers para llamar a la API de Telegram (mensajes, botones, callbacks)
+    consultas.ts          # resúmenes en lenguaje natural (ayer/semana/mes + agrupado por categoría)
 scripts/
-  set-webhook.ts    # script para configurar el webhook de Telegram
+  set-webhook.ts    # script para (re)configurar el webhook de Telegram
 ```
 
-## 1. Crear el bot en @BotFather (obtener `TELEGRAM_BOT_TOKEN`)
+## 6. Setup paso a paso
+
+### 6.1. Crear el bot en @BotFather (`TELEGRAM_BOT_TOKEN`)
 
 1. Abrí Telegram y buscá `@BotFather`.
 2. Enviale `/newbot`.
 3. Elegí un nombre para mostrar (ej. "Mis Gastos Bot").
 4. Elegí un username que termine en `bot` (ej. `mis_gastos_fm_bot`).
-5. BotFather te va a devolver un token con este formato:
-   `123456789:ABCdefGhIJKlmNoPQRstuVwxYZ...`
+5. BotFather te devuelve un token con este formato: `123456789:ABCdefGhIJKlmNoPQRstuVwxYZ...`.
    Ese es tu `TELEGRAM_BOT_TOKEN`. Guardalo, no lo compartas ni lo subas al repo.
 
-## 2. Obtener tu `TELEGRAM_AUTHORIZED_CHAT_ID`
-
-Opción simple, sin desplegar nada todavía:
+### 6.2. Obtener tu `TELEGRAM_AUTHORIZED_CHAT_ID`
 
 1. Buscá en Telegram al bot `@userinfobot` (o `@RawDataBot`) y enviale cualquier mensaje.
-2. Te va a responder con tu `chat_id` (o `Id`) — un número, puede ser negativo si es un grupo.
+2. Te responde con tu `chat_id` (o `Id`) — un número.
 3. Usá ese número como `TELEGRAM_AUTHORIZED_CHAT_ID`.
 
-Alternativa (una vez que el bot ya esté desplegado y el webhook configurado): escribile cualquier
-mensaje a tu bot y revisá los logs de Vercel — el bot va a ignorar el mensaje por venir de un chat
-no autorizado, pero podés loguear `message.chat.id` temporalmente para verlo.
+### 6.3. Generar `TELEGRAM_WEBHOOK_SECRET`
 
-## 3. Generar `TELEGRAM_WEBHOOK_SECRET`
-
-Cualquier string aleatorio largo sirve, por ejemplo generalo así:
+Cualquier string aleatorio largo sirve:
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-Guardá el resultado como `TELEGRAM_WEBHOOK_SECRET`.
+### 6.4. Cargar `GOOGLE_PRIVATE_KEY` en Vercel
 
-## 4. Cargar `GOOGLE_PRIVATE_KEY` en Vercel
+El JSON descargado de la Service Account tiene un campo `private_key` con `\n` literales dentro
+del string. Copiá ese valor completo tal cual aparece entre comillas en el JSON (con los `\n`
+literales, no saltos de línea reales) y pegalo como valor de `GOOGLE_PRIVATE_KEY` en Vercel. El
+código (`src/lib/sheets.ts`) ya hace `.replace(/\\n/g, "\n")` para convertirlos, así que no hace
+falta reformatear nada vos.
 
-El JSON descargado de la cuenta de servicio tiene un campo `private_key` con saltos de línea
-reales (`\n` literales dentro de un string con comillas). Al pegarlo en Vercel:
+Si preferís correr el bot en local, copiá `.env.example` a `.env.local` y completá los valores
+(`.env.local` ya está en `.gitignore`, nunca se commitea).
 
-1. Abrí el archivo JSON de la cuenta de servicio.
-2. Copiá el valor completo de `private_key`, tal cual aparece entre comillas en el JSON
-   (incluye literalmente las secuencias `\n`, **no** saltos de línea reales).
-3. En Vercel → Settings → Environment Variables, creá `GOOGLE_PRIVATE_KEY` y pegá ese valor
-   completo (con los `\n` literales, como texto plano de una sola línea).
-4. El código (`src/lib/sheets.ts`) ya hace `.replace(/\\n/g, "\n")` para convertir esos `\n`
-   literales en saltos de línea reales al usar la key, así que no hace falta que la
-   reformatees vos.
+### 6.5. Cargar las variables de entorno en Vercel
 
-Si preferís correr el bot en local para probar, copiá `.env.example` a `.env.local` y completá
-los valores (asegurate de que `.env.local` nunca se commitee — ya está en `.gitignore`).
+En el dashboard de Vercel → proyecto → Settings → Environment Variables, cargá las 6 variables
+de la tabla de la sección 4, marcando los entornos que necesites (Production/Preview). Después
+hacé un redeploy para que tomen efecto (o el próximo push a `main` ya las va a usar).
 
-## 5. Variables de entorno en Vercel
+### 6.6. Preparar la Google Sheet
 
-En el dashboard de Vercel, dentro del proyecto → Settings → Environment Variables, cargá:
+Crear/verificar 4 pestañas:
 
-```
-TELEGRAM_BOT_TOKEN=<el token de BotFather>
-TELEGRAM_WEBHOOK_SECRET=<el string aleatorio generado>
-TELEGRAM_AUTHORIZED_CHAT_ID=<tu chat_id>
-GOOGLE_SERVICE_ACCOUNT_EMAIL=bot-gastos-sheets@bot-gastos-personal-506919.iam.gserviceaccount.com
-GOOGLE_PRIVATE_KEY=<la private key completa, con \n literales>
-GOOGLE_SHEET_ID=1Po46JcehiJ5L1KvAxCjtiyBgG5CaCvkz8qarOYRNdo4
-```
+1. **`Movimientos`**: encabezado en A1:F1 → `Fecha del gasto | Hora de carga | Categoría | Descripción | Monto | Mensaje Original`.
+2. **`Estado`**: pestaña vacía (puede quedar oculta). El bot escribe ahí solo, no hace falta tocarla.
+3. **`Keywords`**: encabezado en A1:B1 → `Palabra clave | Categoría`. También la va llenando el bot solo.
+4. **`Dashboard`**: ver sección 6.9 para armar gráficos y fórmulas.
 
-Marcá las variables para los entornos Production y Preview según necesites. Después hacé un
-redeploy para que tomen efecto (o simplemente el próximo push a `main` ya las va a usar).
+### 6.7. Deploy en Vercel
 
-## 6. Preparar la Google Sheet
+1. Pusheá el repo a GitHub.
+2. En Vercel, importá el repo (Add New → Project). Detecta Next.js automáticamente.
+3. Cargá las variables de entorno (paso 6.5) antes o después del primer deploy.
+4. Copiá la URL de producción (ej. `https://bot-gastos-personal.vercel.app`).
 
-La hoja ya está creada y compartida como Editor con la cuenta de servicio. Falta:
-
-1. Verificar que la primera hoja se llame exactamente `Movimientos`, con esta fila de encabezado
-   en A1:F1:
-   `Fecha del gasto | Hora de carga | Categoría | Descripción | Monto | Mensaje Original`
-2. Crear una hoja adicional llamada exactamente `Estado` (puede quedar oculta). El bot la usa
-   internamente para recordar cuál es el último gasto cargado (para los botones Editar/Borrar),
-   si hay una edición pendiente, y si hay una categorización pendiente (cuando preguntó por
-   botones y todavía no respondiste). No hace falta ponerle nada manualmente, el bot escribe
-   ahí solo.
-3. Crear una hoja adicional llamada exactamente `Keywords`, con esta fila de encabezado en
-   A1:B1: `Palabra clave | Categoría`. Ahí el bot guarda las palabras que le enseñaste a
-   reconocer (ver sección "Aprendizaje de categorías" más abajo). Podés dejarla vacía, el bot
-   agrega filas solo.
-4. Crear una hoja `Dashboard` para los gráficos (ver sección 8).
-
-## 7. Deploy en Vercel
-
-Mismo flujo que ya usás en tu proyecto "Acopio":
-
-1. Pusheá este repo a GitHub.
-2. En Vercel, importá el repo (Add New → Project).
-3. Vercel detecta Next.js automáticamente, no hace falta configurar nada especial.
-4. Cargá las variables de entorno del paso 5 antes o después del primer deploy (si las cargás
-   después, hacé un redeploy).
-5. Una vez deployado, copiá la URL de producción (ej. `https://bot-gastos-personal.vercel.app`).
-
-## 8. Setear el webhook de Telegram
-
-Con la URL de producción de Vercel, corré:
+### 6.8. Setear el webhook de Telegram
 
 ```bash
 TELEGRAM_BOT_TOKEN=<tu token> TELEGRAM_WEBHOOK_SECRET=<tu secret> APP_URL=https://tu-app.vercel.app npm run set-webhook
 ```
 
 Debería responder algo como `{"ok": true, "result": true, "description": "Webhook was set"}`.
-
 Para verificar el estado del webhook en cualquier momento:
 
 ```bash
 curl "https://api.telegram.org/bot<TU_TOKEN>/getWebhookInfo"
 ```
 
-## 9. Probar el bot
+### 6.9. Armar el Dashboard en Google Sheets
 
-Escribile a tu bot en Telegram (desde el chat cuyo `chat_id` cargaste como autorizado):
+En la hoja `Dashboard` (recordá: separador `;`, no `,`, por la configuración regional española):
+
+1. **Gasto total por categoría**: tabla dinámica sobre `Movimientos!A:F` (Filas: Categoría,
+   Valores: Suma de Monto) + gráfico de torta o barras sobre esa tabla.
+2. **Evolución diaria/semanal**: tabla dinámica con Filas: Fecha del gasto (agrupada por día o
+   semana) + gráfico de líneas.
+3. **Día con mayor gasto**: `=CONSULTA(Movimientos!A:E; "select A, sum(E) where A is not null group by A order by sum(E) desc limit 1")`.
+4. **Mes actual vs. mes anterior**: `=SUMAR.SI(Movimientos!A:A; ">="&FECHA(AÑO(HOY());MES(HOY());1); Movimientos!E:E)` para el mes actual, con el rango análogo desplazado un mes para el anterior.
+5. **Top 10 del mes**: `=CONSULTA(Movimientos!A:E; "select A, C, D, E where A >= date '"&TEXTO(FECHA(AÑO(HOY());MES(HOY());1);"yyyy-mm-dd")&"' order by E desc limit 10")`.
+
+Si preferís no pelear con fórmulas `QUERY`/`CONSULTA`, tablas dinámicas + gráficos generados
+directo desde ellas cubren todo lo mismo con menos fricción.
+
+## 7. Ejemplos de uso reales
 
 ```
-gasto cena 15.000 pesos
-```
-
-Debería responder con el resumen del gasto y los botones ✏️ Editar / 🗑️ Borrar, y la fila debería
-aparecer en la hoja `Movimientos`.
-
-Probá también:
-
-```
+gasto nafta 55000
+gastos fideos 15000
+gasto asado manu pinedo 22580 pesos
+gasto luz 25/08 35000
+gasto nafta ayer 40000
+gastos de ayer
+semana pasada
+mes pasado
 /ayuda
-resumen del mes
-gastos de la semana pasada
 ```
 
-## 10. Armar el Dashboard en Google Sheets
+## 8. Notas de mantenimiento
 
-En la hoja `Dashboard`:
-
-1. **Gasto total por categoría**: Insertar → Tabla dinámica, con origen en `Movimientos!A:F`.
-   Filas: Categoría. Valores: Suma de Monto. Después Insertar → Gráfico → tipo torta o barras,
-   usando la tabla dinámica como fuente.
-2. **Evolución día a día / semana a semana**: tabla dinámica con Filas: Fecha del gasto
-   (agrupá por semana o día desde el menú de la tabla dinámica → clic derecho → "Crear grupo de
-   fechas dinámicas"), Valores: Suma de Monto. Gráfico de líneas sobre esa tabla.
-3. **Día con mayor gasto del mes**: fórmula tipo
-   `=INDICE(Movimientos!A:A; COINCIDIR(MAX(SUMAR.SI.CONJUNTO(...)); ...))`, o más simple: armá
-   una tabla dinámica agrupada por día con Suma de Monto, ordenala de mayor a menor y mirá la
-   primera fila. También podés usar `=CONSULTA(Movimientos!A:E; "select A, sum(E) where A is not null group by A order by sum(E) desc limit 1")`.
-4. **Total del mes actual vs. mes anterior**: dos celdas con
-   `=SUMAR.SI(Movimientos!A:A; ">="&FECHA(AÑO(HOY());MES(HOY());1); Movimientos!E:E)` para el mes
-   actual, y un rango análogo con `FECHA(AÑO(HOY());MES(HOY())-1;1)` y
-   `FECHA(AÑO(HOY());MES(HOY());1)-1` como límites para el mes anterior.
-5. **Top 10 gastos individuales del mes**: `=CONSULTA(Movimientos!A:E; "select A, C, D, E where A >= date '"&TEXTO(FECHA(AÑO(HOY());MES(HOY());1);"yyyy-mm-dd")&"' order by E desc limit 10")`
-   (ajustá el formato de fecha si `CONSULTA`/`QUERY` no reconoce las fechas como tales — puede
-   hacer falta que la columna A esté en formato Fecha real, no texto).
-
-Si preferís no pelear con fórmulas `QUERY`, el camino más simple para todo el Dashboard es:
-tablas dinámicas (Insertar → Tabla dinámica) para cada bloque, y gráficos generados directo
-desde esas tablas dinámicas (Insertar → Gráfico).
-
-## Aprendizaje de categorías
-
-Cuando cargás un gasto con una palabra que no matchea ninguna keyword del diccionario fijo
-(`src/lib/categorias.ts`) ni de ninguna aprendida antes, el bot **no lo guarda directo como
-"Otros"**: te pregunta por botones inline a qué categoría pertenece. Al elegir una:
-
-1. Guarda el gasto en `Movimientos` con esa categoría.
-2. Agrega una fila en `Keywords` con la palabra detectada del mensaje y la categoría elegida.
-3. Confirma por Telegram y a partir de ahí reconoce esa palabra automáticamente.
-
-Si escribís explícitamente "otros" o "varios" en el mensaje, va directo a "Otros" sin preguntar
-(se interpreta como una elección a propósito, no como una palabra desconocida).
-
-## Notas de diseño
-
-- **Sin base de datos**: todo el estado vive en la Google Sheet, incluida la hoja auxiliar
-  `Estado` que reemplaza la memoria en proceso (las funciones serverless de Vercel no garantizan
-  persistencia entre invocaciones).
-- **Categorías editables**: el diccionario de keywords está en `src/lib/categorias.ts`. Para
-  sumar o ajustar palabras clave no hace falta tocar `parser.ts`.
-- **Edición/borrado**: los botones ✏️ Editar / 🗑️ Borrar solo operan sobre el último gasto
-  cargado (fila guardada en `Estado!B1`). No hay historial de edición más profundo.
-- **Seguridad**: cualquier chat distinto a `TELEGRAM_AUTHORIZED_CHAT_ID` es ignorado
-  silenciosamente. El endpoint valida el header `X-Telegram-Bot-Api-Secret-Token` contra
-  `TELEGRAM_WEBHOOK_SECRET` antes de procesar cualquier update.
+- **Agregar o ajustar categorías/keywords fijas**: editá `src/lib/categorias.ts`
+  (`CATEGORIAS` para el diccionario, `PALABRAS_DISPARADORAS` para sinónimos de "gasto"). No hace
+  falta tocar `parser.ts`.
+- **Palabras aprendidas dinámicamente**: quedan en la hoja `Keywords` y se leen en cada mensaje
+  entrante — no requieren redeploy para empezar a reconocerse.
+- **Fórmulas del Dashboard en español**: usan `;` como separador de argumentos, no `,`. Si algún
+  día se editan manualmente, hay que respetar esa sintaxis o van a tirar `#ERROR!`.
+- **Endpoints temporales ya removidos**: durante el setup inicial existieron `/api/setup-webhook`
+  y `/api/setup-dashboard`, usados una sola vez para configurar el webhook y generar el Dashboard
+  desde el propio servidor de Vercel (evitando depender de la conexión directa a
+  `api.telegram.org`/Google Sheets desde una red con proxy corporativo). Ya no existen en el
+  código. Si en el futuro hace falta re-setear el webhook o reconstruir el Dashboard desde cero,
+  hay que recrear un endpoint temporal similar (protegido con un secret) o hacerlo manualmente
+  con `npm run set-webhook` / tablas dinámicas.
+- **Lectura de fechas desde Sheets**: `sheets.ts` lee las fechas como el número de serie interno
+  de Sheets (`valueRenderOption: UNFORMATTED_VALUE`), no como texto formateado — es
+  intencional, evita ambigüedades de formato (DD/MM vs MM/DD) según cómo Sheets decida mostrar
+  la fecha. No cambiar a leer el valor formateado sin tener esto en cuenta.
+- **Sin historial de edición**: los botones ✏️ Editar / 🗑️ Borrar solo operan sobre el último
+  gasto cargado (referencia en `Estado!B1`), no hay edición de gastos más antiguos por botón —
+  para eso, editar directo la fila en `Movimientos`.
