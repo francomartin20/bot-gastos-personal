@@ -15,7 +15,13 @@ import {
   setPendingCategorizacion,
   getPendingCategorizacion,
 } from "@/lib/sheets";
-import { sendMessage, editMessageText, answerCallbackQuery, InlineButton } from "@/lib/telegram";
+import {
+  sendMessage,
+  editMessageText,
+  editMessageReplyMarkup,
+  answerCallbackQuery,
+  InlineButton,
+} from "@/lib/telegram";
 import { esConsulta, generarResumen } from "@/lib/consultas";
 
 export const dynamic = "force-dynamic";
@@ -50,21 +56,46 @@ function botonesGasto(): InlineButton[][] {
 }
 
 const PREFIJO_CALLBACK_CATEGORIA = "catIdx:";
+const PREFIJO_CALLBACK_PAGINA = "catPage:";
+const CATEGORIAS_POR_PAGINA = 8;
 
-function botonesCategorias(): InlineButton[][] {
+function totalPaginasCategorias(): number {
+  return Math.ceil(CATEGORIAS.length / CATEGORIAS_POR_PAGINA);
+}
+
+/**
+ * Botones del menú de categorías, paginado (respeta el orden de categorias.ts). Al elegir una
+ * categoría el callback_data lleva su índice global (catIdx:N), independiente de la página en
+ * la que se tocó. La navegación entre páginas (catPage:N) solo cambia qué botones se muestran;
+ * ese estado vive en el propio callback_data, no hace falta persistirlo en la hoja "Estado".
+ */
+function botonesCategorias(pagina: number): InlineButton[][] {
+  const inicio = pagina * CATEGORIAS_POR_PAGINA;
+  const itemsPagina = CATEGORIAS.slice(inicio, inicio + CATEGORIAS_POR_PAGINA);
+
   const filas: InlineButton[][] = [];
-  for (let i = 0; i < CATEGORIAS.length; i += 2) {
+  for (let i = 0; i < itemsPagina.length; i += 2) {
     const fila: InlineButton[] = [
-      { text: CATEGORIAS[i].nombre, callback_data: `${PREFIJO_CALLBACK_CATEGORIA}${i}` },
+      { text: itemsPagina[i].nombre, callback_data: `${PREFIJO_CALLBACK_CATEGORIA}${inicio + i}` },
     ];
-    if (CATEGORIAS[i + 1]) {
+    if (itemsPagina[i + 1]) {
       fila.push({
-        text: CATEGORIAS[i + 1].nombre,
-        callback_data: `${PREFIJO_CALLBACK_CATEGORIA}${i + 1}`,
+        text: itemsPagina[i + 1].nombre,
+        callback_data: `${PREFIJO_CALLBACK_CATEGORIA}${inicio + i + 1}`,
       });
     }
     filas.push(fila);
   }
+
+  const filaNav: InlineButton[] = [];
+  if (pagina > 0) {
+    filaNav.push({ text: "◀️ Anterior", callback_data: `${PREFIJO_CALLBACK_PAGINA}${pagina - 1}` });
+  }
+  if (pagina < totalPaginasCategorias() - 1) {
+    filaNav.push({ text: "Siguiente ▶️", callback_data: `${PREFIJO_CALLBACK_PAGINA}${pagina + 1}` });
+  }
+  if (filaNav.length > 0) filas.push(filaNav);
+
   return filas;
 }
 
@@ -201,7 +232,7 @@ async function manejarMensaje(message: any) {
     await sendMessage(
       chatId,
       `🤔 No reconozco "${parseado.palabraClaveDesconocida}". ¿En qué categoría va?`,
-      botonesCategorias()
+      botonesCategorias(0)
     );
     return;
   }
@@ -237,6 +268,13 @@ async function manejarCallback(callbackQuery: any) {
   const data: string = callbackQuery.data;
 
   if (!chatAutorizado(chatId)) {
+    await answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+
+  if (data.startsWith(PREFIJO_CALLBACK_PAGINA)) {
+    const pagina = parseInt(data.slice(PREFIJO_CALLBACK_PAGINA.length), 10);
+    await editMessageReplyMarkup(chatId, messageId, botonesCategorias(pagina));
     await answerCallbackQuery(callbackQuery.id);
     return;
   }

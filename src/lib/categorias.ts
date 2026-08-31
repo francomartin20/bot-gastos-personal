@@ -153,6 +153,28 @@ export const CATEGORIAS: CategoriaConfig[] = [
 export const CATEGORIA_DEFAULT = "Otros";
 
 /**
+ * Palabras que arrancan un mensaje de carga de gasto y se ignoran al analizar el resto del
+ * texto (detección de categoría, descripción y palabra clave a aprender). El matching es
+ * insensible a mayúsculas (ver parser.ts), por eso alcanza con listar cada variante de acento
+ * una sola vez. Para sumar un sinónimo nuevo, solo hace falta agregarlo acá.
+ */
+export const PALABRAS_DISPARADORAS = [
+  "gasto",
+  "gastos",
+  "gaste",
+  "gasté",
+  "pague",
+  "pagué",
+  "pago",
+  "desconte",
+  "desconté",
+  "cargame",
+  "compre",
+  "compré",
+  "compra",
+];
+
+/**
  * Palabras que indican momento del día "mediodía" — usadas por la regla especial de "asado".
  */
 export const KEYWORDS_ALMUERZO = ["almuerzo", "mediodia", "mediodía", "mediodia"];

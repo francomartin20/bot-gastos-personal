@@ -1,4 +1,4 @@
-import { CATEGORIAS, CATEGORIA_DEFAULT, KEYWORDS_ALMUERZO } from "./categorias";
+import { CATEGORIAS, CATEGORIA_DEFAULT, KEYWORDS_ALMUERZO, PALABRAS_DISPARADORAS } from "./categorias";
 
 export interface GastoParseado {
   fecha: Date;
@@ -56,6 +56,12 @@ function normalizar(texto: string): string {
 function escapeRegex(texto: string): string {
   return texto.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+// Matchea cualquiera de PALABRAS_DISPARADORAS al inicio del mensaje (insensible a mayúsculas).
+const patronPalabraDisparadora = new RegExp(
+  `^\\s*(?:${PALABRAS_DISPARADORAS.map(escapeRegex).join("|")})\\s+`,
+  "i"
+);
 
 /**
  * Busca `keyword` como palabra completa (o frase completa) dentro de `texto`, usando límites
@@ -214,7 +220,7 @@ function detectarCategoria(
 function limpiarTextoGasto(textoOriginal: string, montoTexto: string): string {
   let texto = textoOriginal;
 
-  texto = texto.replace(/^\s*gasto\s+/i, "");
+  texto = texto.replace(patronPalabraDisparadora, "");
   texto = texto.replace(montoTexto, " ");
   texto = texto.replace(/\bpesos\b/gi, " ");
   texto = texto.replace(/\$/g, " ");
