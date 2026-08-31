@@ -11,31 +11,37 @@ const CATEGORIA_DATA_END_ROW = 60; // hasta 56 categorías, de sobra
 const EVOLUCION_HEADER_ROW = 3; // fila 4 (1-based)
 const EVOLUCION_DATA_END_ROW = 500; // cubre ~1.3 años de datos diarios
 
+// Nota: la Google Sheet está en configuración regional español, donde las fórmulas usan ";"
+// como separador de argumentos (no ","). Esto aplica a los argumentos de las funciones de
+// Sheets (QUERY, SUMIFS, DATE, EDATE, TEXT, etc.). Las comas DENTRO del string de la consulta
+// SQL que recibe QUERY como segundo argumento (ej. "select C, sum(E) ...") son sintaxis SQL,
+// no separadores de Sheets, y no se tocan.
+
 function formulaCategoria(): string {
-  return `=QUERY(${MOVIMIENTOS_SHEET}!A:E,"select C, sum(E) where C is not null group by C order by sum(E) desc label C 'Categoría', sum(E) 'Total'",1)`;
+  return `=QUERY(${MOVIMIENTOS_SHEET}!A:E;"select C, sum(E) where C is not null group by C order by sum(E) desc label C 'Categoría', sum(E) 'Total'";1)`;
 }
 
 function formulaEvolucionDiaria(): string {
-  return `=QUERY(${MOVIMIENTOS_SHEET}!A:E,"select A, sum(E) where A is not null group by A order by A label A 'Fecha', sum(E) 'Total'",1)`;
+  return `=QUERY(${MOVIMIENTOS_SHEET}!A:E;"select A, sum(E) where A is not null group by A order by A label A 'Fecha', sum(E) 'Total'";1)`;
 }
 
 function formulaDiaMayorGasto(): string {
-  return `=QUERY(${MOVIMIENTOS_SHEET}!A:E,"select A, sum(E) where A is not null group by A order by sum(E) desc limit 1 label A 'Fecha', sum(E) 'Total'",1)`;
+  return `=QUERY(${MOVIMIENTOS_SHEET}!A:E;"select A, sum(E) where A is not null group by A order by sum(E) desc limit 1 label A 'Fecha', sum(E) 'Total'";1)`;
 }
 
 function formulaTotalMesActual(): string {
-  return `=SUMIFS(${MOVIMIENTOS_SHEET}!E:E,${MOVIMIENTOS_SHEET}!A:A,">="&DATE(YEAR(TODAY()),MONTH(TODAY()),1),${MOVIMIENTOS_SHEET}!A:A,"<"&EDATE(DATE(YEAR(TODAY()),MONTH(TODAY()),1),1))`;
+  return `=SUMIFS(${MOVIMIENTOS_SHEET}!E:E;${MOVIMIENTOS_SHEET}!A:A;">="&DATE(YEAR(TODAY());MONTH(TODAY());1);${MOVIMIENTOS_SHEET}!A:A;"<"&EDATE(DATE(YEAR(TODAY());MONTH(TODAY());1);1))`;
 }
 
 function formulaTotalMesAnterior(): string {
-  return `=SUMIFS(${MOVIMIENTOS_SHEET}!E:E,${MOVIMIENTOS_SHEET}!A:A,">="&EDATE(DATE(YEAR(TODAY()),MONTH(TODAY()),1),-1),${MOVIMIENTOS_SHEET}!A:A,"<"&DATE(YEAR(TODAY()),MONTH(TODAY()),1))`;
+  return `=SUMIFS(${MOVIMIENTOS_SHEET}!E:E;${MOVIMIENTOS_SHEET}!A:A;">="&EDATE(DATE(YEAR(TODAY());MONTH(TODAY());1);-1);${MOVIMIENTOS_SHEET}!A:A;"<"&DATE(YEAR(TODAY());MONTH(TODAY());1))`;
 }
 
 function formulaTop10MesActual(): string {
   return (
-    `=QUERY(${MOVIMIENTOS_SHEET}!A:E,"select A, C, D, E where A >= date '"&` +
-    `TEXT(DATE(YEAR(TODAY()),MONTH(TODAY()),1),"yyyy-mm-dd")&` +
-    `"' order by E desc limit 10 label A 'Fecha', C 'Categoría', D 'Descripción', E 'Monto'",1)`
+    `=QUERY(${MOVIMIENTOS_SHEET}!A:E;"select A, C, D, E where A >= date '"&` +
+    `TEXT(DATE(YEAR(TODAY());MONTH(TODAY());1);"yyyy-mm-dd")&` +
+    `"' order by E desc limit 10 label A 'Fecha', C 'Categoría', D 'Descripción', E 'Monto'";1)`
   );
 }
 
