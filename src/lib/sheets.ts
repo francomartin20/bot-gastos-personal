@@ -17,7 +17,7 @@ export interface FilaGastoConIndice extends FilaGasto {
   rowIndex: number; // índice de fila 1-based tal como aparece en la hoja (incluye header)
 }
 
-export function getAuth() {
+function getAuth() {
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   const privateKey = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
 
@@ -32,12 +32,12 @@ export function getAuth() {
   });
 }
 
-export function getSheetsClient() {
+function getSheetsClient() {
   const auth = getAuth();
   return google.sheets({ version: "v4", auth });
 }
 
-export function getSpreadsheetId(): string {
+function getSpreadsheetId(): string {
   const id = process.env.GOOGLE_SHEET_ID;
   if (!id) throw new Error("Falta GOOGLE_SHEET_ID en las variables de entorno");
   return id;
