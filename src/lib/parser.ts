@@ -5,7 +5,45 @@ export interface GastoParseado {
   categoria: string;
   descripcion: string;
   monto: number;
+  /** true si la categoría se detectó por una keyword real (fija o aprendida); false si fue
+   * fallback a CATEGORIA_DEFAULT por no reconocer ninguna palabra. */
+  matchedByKeyword: boolean;
+  /** Solo presente cuando matchedByKeyword es false: la palabra candidata a "aprender". */
+  palabraClaveDesconocida?: string;
 }
+
+/** Keyword aprendida dinámicamente (hoja "Keywords"), combinada con el diccionario fijo. */
+export interface KeywordDinamica {
+  palabra: string;
+  categoria: string;
+}
+
+const STOPWORDS = new Set([
+  "de",
+  "del",
+  "la",
+  "el",
+  "los",
+  "las",
+  "un",
+  "una",
+  "unos",
+  "unas",
+  "con",
+  "sin",
+  "por",
+  "para",
+  "en",
+  "y",
+  "o",
+  "a",
+  "al",
+  "que",
+  "mi",
+  "tu",
+  "su",
+  "lo",
+]);
 
 function quitarAcentos(texto: string): string {
   return texto.normalize("NFD").replace(/[̀-ͯ]/g, "");
@@ -137,66 +175,98 @@ function detectarFecha(textoNormalizado: string, ahora: Date): Date {
   return ahora;
 }
 
-function detectarCategoria(textoNormalizado: string): string {
+function detectarCategoria(
+  textoNormalizado: string,
+  keywordsDinamicos: KeywordDinamica[]
+): { categoria: string; matched: boolean } {
   // Regla especial: "asado" no es categoría propia -> Cena o Almuerzo
   if (/\basado\b/.test(textoNormalizado)) {
     const esAlmuerzo = KEYWORDS_ALMUERZO.some((kw) => contieneKeyword(textoNormalizado, normalizar(kw)));
-    return esAlmuerzo ? "Almuerzo" : "Cenas";
+    return { categoria: esAlmuerzo ? "Almuerzo" : "Cenas", matched: true };
   }
 
   for (const cat of CATEGORIAS) {
     for (const kw of cat.keywords) {
       const kwNorm = normalizar(kw);
       if (contieneKeyword(textoNormalizado, kwNorm)) {
-        return cat.nombre;
+        return { categoria: cat.nombre, matched: true };
       }
     }
   }
 
-  return CATEGORIA_DEFAULT;
+  // Keywords aprendidas dinámicamente (hoja "Keywords"): se chequean después del diccionario
+  // fijo, así una entrada aprendida nunca pisa una keyword ya definida en categorias.ts.
+  for (const kd of keywordsDinamicos) {
+    const kwNorm = normalizar(kd.palabra);
+    if (kwNorm && contieneKeyword(textoNormalizado, kwNorm)) {
+      return { categoria: kd.categoria, matched: true };
+    }
+  }
+
+  return { categoria: CATEGORIA_DEFAULT, matched: false };
 }
 
 /**
- * Extrae una descripción corta del mensaje, quitando la palabra "gasto", el monto detectado,
- * palabras de fecha ("ayer", "anteayer", fechas explícitas) y la palabra "pesos".
+ * Quita del mensaje original la palabra "gasto" inicial, el monto detectado, "pesos"/"$",
+ * fechas explícitas y "ayer"/"anteayer". Es la base compartida por extraerDescripcion y
+ * extraerPalabraClave.
  */
-function extraerDescripcion(textoOriginal: string, montoTexto: string): string {
+function limpiarTextoGasto(textoOriginal: string, montoTexto: string): string {
   let texto = textoOriginal;
 
-  // Quita "gasto" al inicio (case-insensitive)
   texto = texto.replace(/^\s*gasto\s+/i, "");
-
-  // Quita el monto detectado
   texto = texto.replace(montoTexto, " ");
-
-  // Quita "pesos" / "$"
   texto = texto.replace(/\bpesos\b/gi, " ");
   texto = texto.replace(/\$/g, " ");
-
-  // Quita fechas explícitas y relativas
   texto = texto.replace(/\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/g, " ");
   texto = texto.replace(/\banteayer\b/gi, " ");
   texto = texto.replace(/\bayer\b/gi, " ");
 
-  texto = texto.replace(/\s+/g, " ").trim();
+  return texto.replace(/\s+/g, " ").trim();
+}
 
+/**
+ * Extrae una descripción corta del mensaje (ver limpiarTextoGasto), capitalizada.
+ */
+function extraerDescripcion(textoOriginal: string, montoTexto: string): string {
+  const texto = limpiarTextoGasto(textoOriginal, montoTexto);
   if (texto.length === 0) return "Gasto";
-
-  // Capitaliza la primera letra
   return texto.charAt(0).toUpperCase() + texto.slice(1);
 }
 
 /**
- * Parsea un mensaje de texto libre tipo "gasto cena 15.000 pesos".
+ * Elige una única palabra "candidata" del mensaje para aprender como keyword de categoría,
+ * cuando no matcheó ninguna keyword conocida. Se descartan stopwords genéricas (de, con, el...)
+ * y palabras muy cortas (<3 letras) para evitar aprender términos demasiado ambiguos.
+ */
+function extraerPalabraClave(textoOriginal: string, montoTexto: string): string {
+  const texto = normalizar(limpiarTextoGasto(textoOriginal, montoTexto));
+  const tokens = texto
+    .split(/\s+/)
+    .map((t) => t.replace(/[^a-z0-9]/g, ""))
+    .filter(Boolean);
+
+  const relevante = tokens.find((t) => t.length >= 3 && !STOPWORDS.has(t));
+  return relevante ?? tokens[0] ?? "otros";
+}
+
+/**
+ * Parsea un mensaje de texto libre tipo "gasto cena 15.000 pesos". `keywordsDinamicos` son las
+ * keywords aprendidas previamente (hoja "Keywords"), combinadas con el diccionario fijo de
+ * categorias.ts para la detección de categoría.
  * Devuelve null si no se pudo detectar un monto válido.
  */
-export function parsearGasto(textoOriginal: string, ahora: Date = new Date()): GastoParseado | null {
+export function parsearGasto(
+  textoOriginal: string,
+  ahora: Date = new Date(),
+  keywordsDinamicos: KeywordDinamica[] = []
+): GastoParseado | null {
   const montoDetectado = detectarMonto(textoOriginal);
   if (!montoDetectado) return null;
 
   const textoNormalizado = normalizar(textoOriginal);
   const fecha = detectarFecha(textoNormalizado, ahora);
-  const categoria = detectarCategoria(textoNormalizado);
+  const { categoria, matched } = detectarCategoria(textoNormalizado, keywordsDinamicos);
   const descripcion = extraerDescripcion(textoOriginal, montoDetectado.matchTexto);
 
   return {
@@ -204,5 +274,9 @@ export function parsearGasto(textoOriginal: string, ahora: Date = new Date()): G
     categoria,
     descripcion,
     monto: montoDetectado.monto,
+    matchedByKeyword: matched,
+    palabraClaveDesconocida: matched
+      ? undefined
+      : extraerPalabraClave(textoOriginal, montoDetectado.matchTexto),
   };
 }

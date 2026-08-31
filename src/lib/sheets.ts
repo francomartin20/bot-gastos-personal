@@ -292,3 +292,93 @@ export async function getLastRow(): Promise<number | null> {
   return isNaN(n) ? null : n;
 }
 
+export interface PendingCategorizacion {
+  textoOriginal: string;
+  /** ISO string */
+  fecha: string;
+  monto: number;
+  descripcion: string;
+  palabraClave: string;
+}
+
+/**
+ * Guarda en la hoja auxiliar "Estado" (celda C1, como JSON) el gasto que está esperando que el
+ * usuario elija una categoría por botón, porque ninguna keyword (fija ni aprendida) matcheó.
+ * Pasar null limpia el estado.
+ */
+export async function setPendingCategorizacion(data: PendingCategorizacion | null): Promise<void> {
+  const sheets = getSheetsClient();
+  const spreadsheetId = getSpreadsheetId();
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${ESTADO_SHEET}!C1`,
+    valueInputOption: "RAW",
+    requestBody: { values: [[data === null ? "" : JSON.stringify(data)]] },
+  });
+}
+
+export async function getPendingCategorizacion(): Promise<PendingCategorizacion | null> {
+  const sheets = getSheetsClient();
+  const spreadsheetId = getSpreadsheetId();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${ESTADO_SHEET}!C1`,
+  });
+  const val = res.data.values?.[0]?.[0];
+  if (!val) return null;
+  try {
+    return JSON.parse(String(val)) as PendingCategorizacion;
+  } catch {
+    return null;
+  }
+}
+
+const KEYWORDS_SHEET = "Keywords";
+
+export interface KeywordAprendida {
+  palabra: string;
+  categoria: string;
+}
+
+/**
+ * Lee todas las keywords aprendidas dinámicamente (hoja "Keywords", columnas
+ * "Palabra clave" | "Categoría") para combinarlas con el diccionario fijo de categorias.ts.
+ */
+export async function leerKeywordsDinamicos(): Promise<KeywordAprendida[]> {
+  const sheets = getSheetsClient();
+  const spreadsheetId = getSpreadsheetId();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${KEYWORDS_SHEET}!A:B`,
+  });
+
+  const rows = res.data.values ?? [];
+  const resultado: KeywordAprendida[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    if (i === 0) continue; // header
+    const row = rows[i];
+    if (!row || row.length < 2) continue;
+    const [palabra, categoria] = row;
+    if (!palabra || !categoria) continue;
+    resultado.push({ palabra: String(palabra), categoria: String(categoria) });
+  }
+
+  return resultado;
+}
+
+/**
+ * Agrega una keyword aprendida a la hoja "Keywords" (una fila por palabra->categoría).
+ */
+export async function agregarKeywordAprendida(palabra: string, categoria: string): Promise<void> {
+  const sheets = getSheetsClient();
+  const spreadsheetId = getSpreadsheetId();
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${KEYWORDS_SHEET}!A:B`,
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [[palabra, categoria]] },
+  });
+}
+

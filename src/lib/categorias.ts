@@ -140,6 +140,14 @@ export const CATEGORIAS: CategoriaConfig[] = [
     nombre: "Leña",
     keywords: ["leña", "lena"],
   },
+  {
+    // Keywords explícitas para "Otros": si el usuario tipea "otros"/"varios" a propósito,
+    // esto cuenta como un match real (no como fallback por desconocimiento), lo que permite
+    // distinguirlo del caso "no reconocí ninguna palabra clave" que dispara la pregunta de
+    // aprendizaje de categoría (ver parser.ts: matchedByKeyword).
+    nombre: "Otros",
+    keywords: ["otros", "varios"],
+  },
 ];
 
 export const CATEGORIA_DEFAULT = "Otros";

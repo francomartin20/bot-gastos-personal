@@ -94,9 +94,15 @@ La hoja ya está creada y compartida como Editor con la cuenta de servicio. Falt
    en A1:F1:
    `Fecha del gasto | Hora de carga | Categoría | Descripción | Monto | Mensaje Original`
 2. Crear una hoja adicional llamada exactamente `Estado` (puede quedar oculta). El bot la usa
-   internamente para recordar cuál es el último gasto cargado (para los botones Editar/Borrar)
-   y si hay una edición pendiente. No hace falta ponerle nada manualmente, el bot escribe ahí solo.
-3. Crear una hoja `Dashboard` para los gráficos (ver sección 8).
+   internamente para recordar cuál es el último gasto cargado (para los botones Editar/Borrar),
+   si hay una edición pendiente, y si hay una categorización pendiente (cuando preguntó por
+   botones y todavía no respondiste). No hace falta ponerle nada manualmente, el bot escribe
+   ahí solo.
+3. Crear una hoja adicional llamada exactamente `Keywords`, con esta fila de encabezado en
+   A1:B1: `Palabra clave | Categoría`. Ahí el bot guarda las palabras que le enseñaste a
+   reconocer (ver sección "Aprendizaje de categorías" más abajo). Podés dejarla vacía, el bot
+   agrega filas solo.
+4. Crear una hoja `Dashboard` para los gráficos (ver sección 8).
 
 ## 7. Deploy en Vercel
 
@@ -169,6 +175,19 @@ En la hoja `Dashboard`:
 Si preferís no pelear con fórmulas `QUERY`, el camino más simple para todo el Dashboard es:
 tablas dinámicas (Insertar → Tabla dinámica) para cada bloque, y gráficos generados directo
 desde esas tablas dinámicas (Insertar → Gráfico).
+
+## Aprendizaje de categorías
+
+Cuando cargás un gasto con una palabra que no matchea ninguna keyword del diccionario fijo
+(`src/lib/categorias.ts`) ni de ninguna aprendida antes, el bot **no lo guarda directo como
+"Otros"**: te pregunta por botones inline a qué categoría pertenece. Al elegir una:
+
+1. Guarda el gasto en `Movimientos` con esa categoría.
+2. Agrega una fila en `Keywords` con la palabra detectada del mensaje y la categoría elegida.
+3. Confirma por Telegram y a partir de ahí reconoce esa palabra automáticamente.
+
+Si escribís explícitamente "otros" o "varios" en el mensaje, va directo a "Otros" sin preguntar
+(se interpreta como una elección a propósito, no como una palabra desconocida).
 
 ## Notas de diseño
 

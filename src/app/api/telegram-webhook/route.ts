@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parsearGasto } from "@/lib/parser";
+import { CATEGORIAS } from "@/lib/categorias";
 import { formatearFecha, formatearMonto } from "@/lib/format";
 import {
   agregarGasto,
@@ -9,6 +10,10 @@ import {
   setPendingEdit,
   getLastRow,
   setLastRow,
+  leerKeywordsDinamicos,
+  agregarKeywordAprendida,
+  setPendingCategorizacion,
+  getPendingCategorizacion,
 } from "@/lib/sheets";
 import { sendMessage, editMessageText, answerCallbackQuery, InlineButton } from "@/lib/telegram";
 import { esConsulta, generarResumen } from "@/lib/consultas";
@@ -24,7 +29,8 @@ Para cargar un gasto, escribí un mensaje libre, por ejemplo:
 • gasto nafta ayer 40.000
 • gasto luz 25/08 35.000
 
-El bot detecta automáticamente el monto, la categoría y la fecha.
+El bot detecta automáticamente el monto, la categoría y la fecha. Si no reconoce ninguna
+palabra clave, te va a preguntar la categoría con botones y va a aprenderla para la próxima vez.
 
 Para consultar gastos, escribí algo como:
 • resumen del mes
@@ -41,6 +47,25 @@ function botonesGasto(): InlineButton[][] {
       { text: "🗑️ Borrar", callback_data: "borrar" },
     ],
   ];
+}
+
+const PREFIJO_CALLBACK_CATEGORIA = "catIdx:";
+
+function botonesCategorias(): InlineButton[][] {
+  const filas: InlineButton[][] = [];
+  for (let i = 0; i < CATEGORIAS.length; i += 2) {
+    const fila: InlineButton[] = [
+      { text: CATEGORIAS[i].nombre, callback_data: `${PREFIJO_CALLBACK_CATEGORIA}${i}` },
+    ];
+    if (CATEGORIAS[i + 1]) {
+      fila.push({
+        text: CATEGORIAS[i + 1].nombre,
+        callback_data: `${PREFIJO_CALLBACK_CATEGORIA}${i + 1}`,
+      });
+    }
+    filas.push(fila);
+  }
+  return filas;
 }
 
 function mensajeResumenGasto(params: {
@@ -110,7 +135,8 @@ async function manejarMensaje(message: any) {
   // ¿Hay una edición pendiente? Si es así, este mensaje reemplaza el gasto anterior.
   const pendingRow = await getPendingEdit();
   if (pendingRow !== null) {
-    const parseado = parsearGasto(texto);
+    const keywordsDinamicos = await leerKeywordsDinamicos();
+    const parseado = parsearGasto(texto, new Date(), keywordsDinamicos);
     if (!parseado) {
       await sendMessage(
         chatId,
@@ -151,7 +177,9 @@ async function manejarMensaje(message: any) {
   }
 
   // Carga de gasto normal
-  const parseado = parsearGasto(texto);
+  const ahora = new Date();
+  const keywordsDinamicos = await leerKeywordsDinamicos();
+  const parseado = parsearGasto(texto, ahora, keywordsDinamicos);
   if (!parseado) {
     await sendMessage(
       chatId,
@@ -160,7 +188,24 @@ async function manejarMensaje(message: any) {
     return;
   }
 
-  const ahora = new Date();
+  // No matcheó ninguna keyword (ni fija ni aprendida): en vez de guardar directo como "Otros",
+  // preguntamos la categoría por botones y guardamos el gasto recién cuando responda.
+  if (!parseado.matchedByKeyword && parseado.palabraClaveDesconocida) {
+    await setPendingCategorizacion({
+      textoOriginal: texto,
+      fecha: parseado.fecha.toISOString(),
+      monto: parseado.monto,
+      descripcion: parseado.descripcion,
+      palabraClave: parseado.palabraClaveDesconocida,
+    });
+    await sendMessage(
+      chatId,
+      `🤔 No reconozco "${parseado.palabraClaveDesconocida}". ¿En qué categoría va?`,
+      botonesCategorias()
+    );
+    return;
+  }
+
   const rowIndex = await agregarGasto({
     fecha: parseado.fecha,
     horaCarga: ahora,
@@ -171,6 +216,7 @@ async function manejarMensaje(message: any) {
   });
 
   await setPendingEdit(null); // limpia cualquier edición pendiente vieja (solo el último gasto es editable)
+  await setPendingCategorizacion(null);
   await setLastRow(rowIndex);
 
   await sendMessage(
@@ -192,6 +238,11 @@ async function manejarCallback(callbackQuery: any) {
 
   if (!chatAutorizado(chatId)) {
     await answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+
+  if (data.startsWith(PREFIJO_CALLBACK_CATEGORIA)) {
+    await manejarCallbackCategoria(chatId, messageId, data, callbackQuery.id);
     return;
   }
 
@@ -221,4 +272,54 @@ async function manejarCallback(callbackQuery: any) {
   }
 
   await answerCallbackQuery(callbackQuery.id);
+}
+
+async function manejarCallbackCategoria(
+  chatId: number,
+  messageId: number,
+  data: string,
+  callbackQueryId: string
+): Promise<void> {
+  const idx = parseInt(data.slice(PREFIJO_CALLBACK_CATEGORIA.length), 10);
+  const categoriaElegida = CATEGORIAS[idx];
+  if (!categoriaElegida) {
+    await answerCallbackQuery(callbackQueryId, "Categoría inválida.");
+    return;
+  }
+
+  const pending = await getPendingCategorizacion();
+  if (!pending) {
+    await answerCallbackQuery(callbackQueryId, "Ya no hay ninguna categorización pendiente.");
+    return;
+  }
+
+  const fecha = new Date(pending.fecha);
+  const ahora = new Date();
+
+  const rowIndex = await agregarGasto({
+    fecha,
+    horaCarga: ahora,
+    categoria: categoriaElegida.nombre,
+    descripcion: pending.descripcion,
+    monto: pending.monto,
+    mensajeOriginal: pending.textoOriginal,
+  });
+
+  await agregarKeywordAprendida(pending.palabraClave, categoriaElegida.nombre);
+  await setPendingCategorizacion(null);
+  await setPendingEdit(null);
+  await setLastRow(rowIndex);
+
+  const textoConfirmacion =
+    `✅ Guardado como ${categoriaElegida.nombre}. A partir de ahora voy a reconocer ` +
+    `"${pending.palabraClave}" automáticamente.\n\n` +
+    mensajeResumenGasto({
+      fecha,
+      descripcion: pending.descripcion,
+      categoria: categoriaElegida.nombre,
+      monto: pending.monto,
+    });
+
+  await editMessageText(chatId, messageId, textoConfirmacion, botonesGasto());
+  await answerCallbackQuery(callbackQueryId, "Guardado");
 }
