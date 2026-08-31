@@ -135,9 +135,16 @@ export async function leerTodasLasFilas(): Promise<FilaGastoConIndice[]> {
   const sheets = getSheetsClient();
   const spreadsheetId = getSpreadsheetId();
 
+  // valueRenderOption UNFORMATTED_VALUE: devuelve el valor real de la celda (para fechas, el
+  // número de serie interno de Sheets) en vez del texto formateado que se ve en pantalla. Es
+  // clave para las fechas: el formato de visualización que Sheets le asigna automáticamente a
+  // una fecha recién autodetectada (vía USER_ENTERED al escribir) no está garantizado que
+  // respete el locale del spreadsheet, así que parsear el string mostrado (ej. "8/30/2026" vs
+  // "30/8/2026") es ambiguo entre DD/MM y MM/DD. El número de serie no tiene esa ambigüedad.
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: RANGE_ALL,
+    valueRenderOption: "UNFORMATTED_VALUE",
   });
 
   const rows = res.data.values ?? [];
@@ -148,29 +155,81 @@ export async function leerTodasLasFilas(): Promise<FilaGastoConIndice[]> {
     if (i === 0) continue; // header
     if (!row || row.length === 0) continue;
 
-    const [fechaStr, horaCargaStr, categoria, descripcion, montoStr, mensajeOriginal] = row;
-    const fecha = parseFechaDDMMYYYY(fechaStr);
+    const [fechaVal, horaCargaVal, categoria, descripcion, montoVal, mensajeOriginal] = row;
+    const fecha = parseCeldaFecha(fechaVal);
     if (!fecha) continue;
 
     resultado.push({
       rowIndex: i + 1, // 1-based, incluyendo header
       fecha,
-      horaCarga: parseFechaHoraDDMMYYYY(horaCargaStr) ?? fecha,
-      categoria: categoria ?? "",
-      descripcion: descripcion ?? "",
-      monto: parseFloat(String(montoStr).replace(/\./g, "").replace(",", ".")) || 0,
-      mensajeOriginal: mensajeOriginal ?? "",
+      horaCarga: parseCeldaFecha(horaCargaVal) ?? fecha,
+      categoria: categoria != null ? String(categoria) : "",
+      descripcion: descripcion != null ? String(descripcion) : "",
+      monto: parseCeldaMonto(montoVal),
+      mensajeOriginal: mensajeOriginal != null ? String(mensajeOriginal) : "",
     });
   }
 
   return resultado;
 }
 
-function parseFechaDDMMYYYY(str: string | undefined): Date | null {
-  if (!str) return null;
-  const m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (!m) return null;
-  return new Date(parseInt(m[3], 10), parseInt(m[2], 10) - 1, parseInt(m[1], 10));
+// Días entre el epoch de Google Sheets (30/12/1899) y el epoch de Unix (01/01/1970).
+// Constante estándar usada para convertir números de serie de Sheets/Excel a fechas.
+const DIAS_EPOCH_SHEETS_A_UNIX = 25569;
+
+/**
+ * Convierte el valor crudo de una celda de fecha (tal como lo devuelve UNFORMATTED_VALUE) a un
+ * Date local, sin depender del formato de visualización ni del locale del spreadsheet.
+ *
+ * - Si es un número (caso normal: Sheets autodetectó la fecha), es un número de serie: se
+ *   convierte a los componentes año/mes/día en UTC (para no arrastrar corrimientos de huso
+ *   horario) y se arma un Date en horario local con esos mismos componentes — así el "día
+ *   calendario" que representa la celda queda igual sin importar en qué zona horaria corra el
+ *   proceso que lee esto.
+ * - Si es un string (fallback: por algún motivo la celda no se autoconvirtió a fecha), se
+ *   intenta parsear como DD/MM/YYYY o DD/MM/YYYY HH:mm, tolerando separadores "/" o "-" y con
+ *   o sin ceros a la izquierda.
+ */
+export function parseCeldaFecha(valor: unknown): Date | null {
+  if (typeof valor === "number" && isFinite(valor)) {
+    const utcMillis = (valor - DIAS_EPOCH_SHEETS_A_UNIX) * 86400000;
+    const utcDate = new Date(Math.round(utcMillis));
+    const horas = Math.round((valor % 1) * 24 * 60) / 60; // fracción del día -> horas
+    const horaEntera = Math.floor(horas);
+    const minutoEntero = Math.round((horas - horaEntera) * 60);
+    return new Date(
+      utcDate.getUTCFullYear(),
+      utcDate.getUTCMonth(),
+      utcDate.getUTCDate(),
+      horaEntera,
+      minutoEntero
+    );
+  }
+
+  if (typeof valor === "string") {
+    const m = valor
+      .trim()
+      .match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/);
+    if (!m) return null;
+    const dia = parseInt(m[1], 10);
+    const mes = parseInt(m[2], 10);
+    const anio = parseInt(m[3], 10);
+    const horaEntera = m[4] ? parseInt(m[4], 10) : 0;
+    const minutoEntero = m[5] ? parseInt(m[5], 10) : 0;
+    if (mes < 1 || mes > 12 || dia < 1 || dia > 31) return null; // descarta MM/DD mal interpretado
+    return new Date(anio, mes - 1, dia, horaEntera, minutoEntero);
+  }
+
+  return null;
+}
+
+function parseCeldaMonto(valor: unknown): number {
+  if (typeof valor === "number" && isFinite(valor)) return valor;
+  if (typeof valor === "string") {
+    const n = parseFloat(valor.replace(/\./g, "").replace(",", "."));
+    return isNaN(n) ? 0 : n;
+  }
+  return 0;
 }
 
 const ESTADO_SHEET = "Estado";
@@ -233,15 +292,3 @@ export async function getLastRow(): Promise<number | null> {
   return isNaN(n) ? null : n;
 }
 
-function parseFechaHoraDDMMYYYY(str: string | undefined): Date | null {
-  if (!str) return null;
-  const m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})$/);
-  if (!m) return null;
-  return new Date(
-    parseInt(m[3], 10),
-    parseInt(m[2], 10) - 1,
-    parseInt(m[1], 10),
-    parseInt(m[4], 10),
-    parseInt(m[5], 10)
-  );
-}
